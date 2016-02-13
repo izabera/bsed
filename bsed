@@ -1,0 +1,158 @@
+#!/bin/bash
+
+# a sed written in bash
+# what works:
+# - all posix commands + most gnu extensions
+# what doesn't work (yet):
+# - parser
+
+
+IFS= LANG=C
+exec 3>&2 2>/dev/null
+
+execute () {
+  case ${instructions[i]} in
+    b) i=${label[${arg[0]-$total}]} ;;
+    d) read -r pat || exit
+       (( lcount++ , i = 0 )) ;;
+    D) if [[ $pat = *$'\n'* ]]; then
+         read -r pat || exit
+         (( lcount++ , i = 0 ))
+       else
+         pat=${pat#*$'\n'} i=0
+       fi ;;
+    i) printf "%s\n" "${arg[0]}" ;;
+    l) escape ;; # parameter like gnu
+    g) pat=$hold ;;
+    G) pat+=$'\n'$hold ;;
+    h) hold=$pat ;;
+    H) hold+=$'\n'$pat ;;
+    n) (( !nflag )) && printf "%s\n" "$pat"
+       read -r pat || exit
+       (( lcount++ , i = 0 )) ;;
+    N) read -r tmp || exit # posix way, not gnu way
+       pat+=$'\n'$tmp
+       (( lcount++ )) ;;
+    p) printf "%s\n" "$pat" ;;
+    P) printf "%s\n" "${pat%%$'\n'*}" ;;
+    q) (( !nflag )) && printf "%s\n" "$pat"; exit "${arg[0]-0}" ;; # parameter like gnu
+    Q) exit "${arg[0]-0}" ;; # gnu
+    r) cat < "${arg[0]}" ;;
+    s) substitute ;;
+    t) (( substflag )) && { substflag=0; i=${label[${arg[0]-$total}]}; } ;;
+    T) (( substflag )) || i=${label[${arg[0]-$total}]} ;; # gnu
+    w) printf "%s\n" "$pat" >> "${arg[0]}" ;;
+    W) printf "%s\n" "${pat%%$'\n'*}" >> "${arg[0]}" ;; # gnu
+    x) tmp=$pat pat=$hold hold=$tmp ;;
+    y) translate ;;
+    =) printf "%s\n" "$lcount" ;;
+  esac
+}
+
+
+declare -A escape=(
+  ['\']='\\'   [$'\n']=$'$\n'
+  [$'\a']='\a' [$'\b']='\b'
+  [$'\f']='\f' [$'\r']='\r'
+  [$'\t']='\t' [$'\v']='\v'
+)
+
+for i in \  ! \" \# \$ % \& \' \( \) \* + , - . / \
+  {0..9} : \; \< = \> \? @ {A..Z} [ ] ^ _ \` {a..z} { \| } \~ ; do
+  escape[$i]=$i
+done
+
+for i in {1..6} {14..31} {127..255}; do
+  printf -v o %03o "$i"
+  printf -v tmp %b "\\$o"
+  escape[$tmp]=\\$o
+done
+
+escape () {
+  buf= len=0 maxlen=${arg[0]-70} # gnu
+  for (( pos = 0; pos < ${#pat}; pos++ )) do
+    tmp=${escape[${pat:pos:1}]}
+    if [[ $tmp = $'$\n' ]]; then
+      printf '%s$\n' "$buf"
+      buf= len=0
+    else
+      if (( ${#buf} + ${#tmp} >= maxlen )); then
+        printf '%s\\\n' "$buf"
+        buf=$tmp
+      else
+        buf+=$tmp
+      fi
+    fi
+  done
+  printf '%s$\n' "$buf"
+}
+
+
+
+
+translate () {
+  # todo: find a faster way to build this table?
+  declare -A translation
+  for i in {1..255}; do
+    printf -v o %o "$i"
+    printf -v tmp %b "\\$o"
+    translation[$tmp]=$tmp
+  done
+  for (( pos = 0; pos < ${#arg[0]}; pos++ )) do
+    translation[${arg[0]:pos:1}]=${arg[1]:pos:1}
+  done
+  tmp=
+  # todo: iterate via read -rn1?
+  for (( pos = 0; pos < ${#pat}; pos++ )) do
+    tmp+=${translation[${pat:pos:1}]}
+  done
+  pat=$tmp
+}
+
+
+
+
+
+# at last, s
+# DUN DUN DUUUUUN
+substitute () {
+  todo=$pat done= occurr=${arg[2]} count=0
+  while [[ $todo ]]; do
+    if [[ $todo =~ ${arg[0]} ]]; then # parser will convert BRE to ERE
+      tmp=${todo%%"${BASH_REMATCH[0]}"*}
+      done+=$tmp
+      todo=${todo#"$tmp"}
+      todo=${todo:${#BASH_REMATCH[0]}}
+      if (( occurr == 0 || ++count == occurr )); then
+        eval "done+=${arg[1]}" # parser will do extra work to make this safe
+        substflag=1
+      else
+        done+=${BASH_REMATCH[0]}
+      fi
+      (( count > occurr )) && break
+    else
+      break
+    fi
+  done
+  pat=$done$todo
+  case ${arg[3]} in
+    p) printf "%s\n" "$pat" ;;
+    w) printf "%s\n" "$pat" >> "${arg[4]}" ;;
+  esac
+}
+
+
+
+
+total=${#instructions[@]}
+
+lcount=0
+while read -r pat; do
+  ((lcount++,i=0))
+  while (( i < total )); do
+    execute
+    (( i++ ))
+  done
+  (( !nflag )) && printf "%s\n" "$pat"
+done
+:
