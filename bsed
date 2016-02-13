@@ -1,18 +1,128 @@
 #!/bin/bash
 
 # a sed written in bash
+
 # what works:
+# - parser
 # - all posix commands + most gnu extensions
 # what doesn't work (yet):
-# - parser
+# - $ (have yet to figure out how to do it properly)
+# - gnu style addresses
+# quirks (for now, but still posix compliant):
+# - jumping to a non existant label jumps to the end of the script
+# - duplicate labels overwrite the previous one
+# - if files lack a trailing newline, last line is ignored
 
 
 IFS= LANG=C
-exec 3>&2 2>/dev/null
+exec 3>&2 #2>/dev/null
+
+die () {
+  printf "%s\n" "$1" >&3
+  exit 1
+}
+
+err () {
+  printf "%s\n" "$1" >&3
+  err=1
+}
+
+sedloop () {
+  while read -r pat; do
+    (( lcount++ , i = 0 ))
+    while (( i < total )); do
+      execute
+      (( i++ ))
+    done
+    (( !nflag )) && printf "%s\n" "$pat"
+  done
+}
+
+parses () {
+  delim=${script:1:1} script=${script:2}
+  [[ $delim = [$'\\\n'] ]] && die "invalid script: bad delim"
+  bre= repl=
+  while [[ $script ]]; do
+    case $script in
+      "$delim"*) script=${script:1}; break ;;
+      \\[\\$delim]*) bre+=${script:1:1} script=${script:2} ;;
+      *) bre+=${script:0:1} script=${script:1} ;;
+    esac
+  done
+  while [[ $script ]]; do
+    case $script in
+      "$delim"*) script=${script:1}; break ;;
+      \\[\\$delim]*) repl+=${script:1:1} script=${script:2} ;;
+      *) repl+=${script:0:1} script=${script:1} ;;
+    esac
+  done
+  while [[ $script ]]; do
+    case $script in
+      g*) arg2[i]=0 script=${script:1} ;;
+      [0-9]*) arg2[i]=${script%%[!0-9]*} script=${script#"${arg2[i]}"} ;;
+      p*) arg3[i]=p script=${script:1} ;;
+      w*) script=${script:1}
+        [[ $script =~ $spaceregex ]] && script=${script#"$BASH_REMATCH"}
+        arg4[i]=${script%%$'\n'*} script=${script#"${arg4[i]}"} ;;
+      \;*) wantdelim=1; break ;;
+      [[:space:]]*) break ;;
+      *) die "invalid script \`$script'" ;;
+    esac
+  done
+  bre2ere; repl2bash
+  arg0[i]=$ere arg1[i]=$bash instructions[i++]=s
+}
+
+parselqQ () {
+  instructions[i++]=${script:0:1} script=${script:1}
+  [[ $script =~ $spaceregex ]] && script=${script#"$BASH_REMATCH"}
+  [[ $script =~ $numregex ]] && arg0[i-1]=$BASH_REMATCH script=${script#"$BASH_REMATCH"}
+  wantdelim=1
+}
+
+parseblock () {
+  script=${script:1}
+  parse
+  [[ $script = }* ]] || die "invalid script: missing }"
+  script=${script:1}
+}
+
+parselabel () {
+  script=${script:1}
+  [[ $script =~ $spaceregex ]] && script=${script#"$BASH_REMATCH"}
+  label=${script%%$'\n'*}
+  [[ $label ]] || die "empty label"
+  labels[$label]=$i
+  script=${script#*$'\n'}
+}
+
+parse () {
+  while [[ $script && $script != }* ]]; do
+    wantdelim=0
+    case $script in
+      :[!$'\n']*) parselabel ;;
+      [btT]*) instructions[i++]=${script:0:1} arg0=${script%%$'\n'*} script=${script#*$'\n'} ;;
+      [\;[:space:]]) script=${script:1} ;;
+      {*) parseblock ;;
+      [dDgGhHnNpPx=]*) instructions[i++]=${script:0:1} script=${script:1} wantdelim=1 ;;
+      s???*) parses ;;
+      [lqQ]*) parselqQ ;;
+      '#'*) script=${script#*$'\n'} ;;
+      *) die "invalid script \`$script'" ;;
+    esac
+    [[ $script =~ $spaceregex ]] && script=${script#"$BASH_REMATCH"}
+    if (( wantdelim )); then
+      [[ $script = [$';\n']* ]] && script=${script:1}
+    else
+      [[ $script ]] && die "invalid script \`$script'" # trailing characters somewhere
+    fi
+  done
+}
+
 
 execute () {
   case ${instructions[i]} in
-    b) i=${label[${arg[0]-$total}]} ;;
+    b) i=${labels[${arg0[i]-$total}]} ;;
     d) read -r pat || exit
        (( lcount++ , i = 0 )) ;;
     D) if [[ $pat = *$'\n'* ]]; then
@@ -21,7 +131,7 @@ execute () {
        else
          pat=${pat#*$'\n'} i=0
        fi ;;
-    i) printf "%s\n" "${arg[0]}" ;;
+    i) printf "%s\n" "${arg0[i]}" ;;
     l) escape ;; # parameter like gnu
     g) pat=$hold ;;
     G) pat+=$'\n'$hold ;;
@@ -35,14 +145,14 @@ execute () {
        (( lcount++ )) ;;
     p) printf "%s\n" "$pat" ;;
     P) printf "%s\n" "${pat%%$'\n'*}" ;;
-    q) (( !nflag )) && printf "%s\n" "$pat"; exit "${arg[0]-0}" ;; # parameter like gnu
-    Q) exit "${arg[0]-0}" ;; # gnu
-    r) cat < "${arg[0]}" ;;
+    q) (( !nflag )) && printf "%s\n" "$pat"; exit "${arg0[i]-0}" ;; # parameter like gnu
+    Q) exit "${arg0[i]-0}" ;; # gnu
+    r) cat < "${arg0[i]}" ;;
     s) substitute ;;
-    t) (( substflag )) && { substflag=0; i=${label[${arg[0]-$total}]}; } ;;
-    T) (( substflag )) || i=${label[${arg[0]-$total}]} ;; # gnu
-    w) printf "%s\n" "$pat" >> "${arg[0]}" ;;
-    W) printf "%s\n" "${pat%%$'\n'*}" >> "${arg[0]}" ;; # gnu
+    t) (( substflag )) && { substflag=0; i=${labels[${arg0[i]}]-$total}; } ;;
+    T) (( substflag )) || i=${labels[${arg0[i]}]-$total} ;; # gnu
+    w) printf "%s\n" "$pat" >> "${arg0[i]}" ;;
+    W) printf "%s\n" "${pat%%$'\n'*}" >> "${arg0[i]}" ;; # gnu
     x) tmp=$pat pat=$hold hold=$tmp ;;
     y) translate ;;
     =) printf "%s\n" "$lcount" ;;
@@ -69,7 +179,7 @@ for i in {1..6} {14..31} {127..255}; do
 done
 
 escape () {
-  buf= len=0 maxlen=${arg[0]-70} # gnu
+  buf= len=0 maxlen=${arg0[i]-${linelen-70}} # gnu
   for (( pos = 0; pos < ${#pat}; pos++ )) do
     tmp=${escape[${pat:pos:1}]}
     if [[ $tmp = $'$\n' ]]; then
@@ -98,8 +208,8 @@ translate () {
     printf -v tmp %b "\\$o"
     translation[$tmp]=$tmp
   done
-  for (( pos = 0; pos < ${#arg[0]}; pos++ )) do
-    translation[${arg[0]:pos:1}]=${arg[1]:pos:1}
+  for (( pos = 0; pos < ${#arg0[i]}; pos++ )) do
+    translation[${arg0[i]:pos:1}]=${arg1[i]:pos:1}
   done
   tmp=
   # todo: iterate via read -rn1?
@@ -116,15 +226,15 @@ translate () {
 # at last, s
 # DUN DUN DUUUUUN
 substitute () {
-  todo=$pat done= occurr=${arg[2]} count=0
+  todo=$pat done= occurr=${arg2[i]} count=0
   while [[ $todo ]]; do
-    if [[ $todo =~ ${arg[0]} ]]; then # parser will convert BRE to ERE
+    if [[ $todo =~ ${arg0[i]} ]]; then # parser will convert BRE to ERE
       tmp=${todo%%"${BASH_REMATCH[0]}"*}
       done+=$tmp
       todo=${todo#"$tmp"}
       todo=${todo:${#BASH_REMATCH[0]}}
       if (( occurr == 0 || ++count == occurr )); then
-        eval "done+=${arg[1]}" # parser will do extra work to make this safe
+        eval "done+=${arg1[i]}" # parser will do extra work to make this safe
         substflag=1
       else
         done+=${BASH_REMATCH[0]}
@@ -135,24 +245,87 @@ substitute () {
     fi
   done
   pat=$done$todo
-  case ${arg[3]} in
-    p) printf "%s\n" "$pat" ;;
-    w) printf "%s\n" "$pat" >> "${arg[4]}" ;;
-  esac
+  [[ ${arg3[i]} ]] && printf "%s\n" "$pat"
+  [[ ${arg4[i]} ]] && printf "%s\n" "$pat" >> "${arg4[i]}"
+}
+
+# left side of s///, change ( ) to \( \), \( \) to ( ), | to \| ...
+# some invalid posix bre are assumed to be gnu bre
+bre2ere () {
+  ere= escaped=0
+  while [[ $bre ]]; do
+    case $bre in
+      \\['(){}|+']*) ere+=${bre:1:1} bre=${bre:2} ;;
+      ['(){}|+']*) ere+=\\${bre:0:1} bre=${bre:1} ;;
+      \\?*) ere+=${bre:0:2} bre=${bre:2} ;;
+      '['*) # here be dragons
+        ere+=[ bre=${bre:1}
+        [[ $bre = ^* ]] && ere+=^ bre=${bre:1}
+        [[ $bre = ]* ]] && ere+=] bre=${bre:1}
+        while [[ $bre != ]* ]]; do
+          case $bre in
+            '[':) bre=${bre:2} ere+=[:${bre%%:]*}:] bre=${bre##*:]} ;;
+            *) ere+=${bre:0:1} bre=${bre:1} ;;
+          esac
+        done
+        ere+=] bre=${bre:1} ;;
+      *) ere+=${bre:0:1} bre=${bre:1} ;;
+    esac
+  done
+}
+
+# right side of s///, just change \1 to ${BASH_REMATCH[1]} etc
+repl2bash () {
+  bash='"'
+  while [[ $repl ]]; do
+    case $repl in
+      \\\\*) bash+='\\' repl=${repl:2} ;;   # TODO: 2 or 4 backslashes?
+      \\[0-9]*) bash+='${BASH_REMATCH['${repl:1:1}']}' repl=${repl:2} ;;
+      '\&'*) bash+='&' repl=${repl:2} ;;
+      \\*) die "invalid replacement" ;;
+      '&'*) bash+='${BASH_REMATCH[0]}' repl=${repl:1} ;;
+      ['"$']*) bash+='\'${repl:0:1} repl=${repl:1} ;;
+      *) bash+=${repl:0:1} repl=${repl:1} ;;
+    esac
+  done
+  bash+='"'
 }
 
 
+unset nflag sflag script linelen OPTIND err lcount
+while getopts :e:f:ln opt; do
+  case $opt in
+    e) script+=$OPTARG$'\n' ;;
+    f) script+=$(< "$OPTARG")$'\n' ;;
+    l) [[ $OPTARG = *[!0-9]* ]] && die "$OPTARG: not a number"; (( linelen = 10#$OPTARG )) ;; # gnu
+    n) nflag=1 ;;
+  esac
+done
+
+shift "$((OPTIND-1))"
+if [[ ! $script ]]; then
+  (( $# )) || die "no script"
+  script=$1
+  shift
+fi
 
 
+
+numregex='^[0-9]+'
+spaceregex='^[[:space:]]*'
+declare -A labels
+[[ $script = "#n"* ]] && nflag=1
+i=0
+parse
+[[ $script ]] && die "invalid script \`$script'"
 total=${#instructions[@]}
 
-lcount=0
-while read -r pat; do
-  ((lcount++,i=0))
-  while (( i < total )); do
-    execute
-    (( i++ ))
+if (( $# )); then
+  for arg do
+    sedloop < "$arg" || err "$arg: file not found"
   done
-  (( !nflag )) && printf "%s\n" "$pat"
-done
-:
+else
+  sedloop
+fi
+
+exit "${err-0}"
